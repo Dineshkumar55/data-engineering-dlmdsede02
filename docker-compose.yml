@@ -1,0 +1,108 @@
+version: '3.8'
+
+networks:
+  taxi-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  kafka_data:
+
+services:
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - taxi-net
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - taxi-net
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: taxiuser
+      POSTGRES_PASSWORD: taxipass
+      POSTGRES_DB: taxidb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    networks:
+      - taxi-net
+    restart: unless-stopped
+
+  ingestion:
+    build: ./ingestion
+    container_name: ingestion
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: nyc-taxi-raw
+      DATA_FILE: /data/yellow_tripdata.csv
+      BATCH_SIZE: "1000"
+      BATCH_INTERVAL_SECONDS: "5"
+    volumes:
+      - ./data:/data
+    networks:
+      - taxi-net
+    restart: on-failure
+
+  spark:
+    build: ./processing
+    container_name: spark
+    depends_on:
+      - kafka
+      - postgres
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: nyc-taxi-raw
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/taxidb
+      POSTGRES_USER: taxiuser
+      POSTGRES_PASSWORD: taxipass
+    networks:
+      - taxi-net
+    restart: on-failure
+
+  api:
+    build: ./api
+    container_name: api
+    depends_on:
+      - postgres
+    ports:
+      - "8000:8000"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: taxidb
+      POSTGRES_USER: taxiuser
+      POSTGRES_PASSWORD: taxipass
+    networks:
+      - taxi-net
+    restart: unless-stopped
